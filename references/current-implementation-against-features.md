@@ -18,10 +18,10 @@
 
 ### 2. Google's Multimodal Embedding Models
 
-| Feature                                              | Status             | Details                                                                                                                                                                                                                                 |
-| ---------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Text embeddings                                      | ✅ Implemented     | `GoogleGenerativeAIEmbeddings(model="gemini-embedding-001", output_dimensionality=1536)` in `db.py`                                                                                                                                     |
-| Multimodal embeddings (`gemini-embedding-2-preview`) | ❌ Not implemented | Images are embedded using text captions only. The `gemini-embedding-2-preview` model (which embeds image bytes directly) is documented as a code comment in `query_service.py` but not wired in. See Issue 11 in `improvement-plans.md` |
+| Feature                                              | Status         | Details                                                                                                                                                                                    |
+| ---------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Text embeddings                                      | ✅ Implemented | `GoogleGenerativeAIEmbeddings(model="gemini-embedding-001", output_dimensionality=1536)` in `db.py`                                                                                        |
+| Multimodal embeddings (`gemini-embedding-2-preview`) | ✅ Implemented | `_embed_image()` in `db.py` sends raw PNG bytes to `gemini-embedding-2-preview` via google-genai SDK. `_embed_texts()` uses the same model for text, placing both in the same vector space |
 
 ---
 
@@ -156,9 +156,9 @@
 | Category                                | Total Features | ✅ Implemented | ⚠️ Partial | ❌ Not Implemented |
 | --------------------------------------- | -------------- | -------------- | ---------- | ------------------ |
 | Image Captioning and OCR                | 3              | 2              | 0          | 1                  |
-| Google Multimodal Embeddings            | 2              | 1              | 0          | 1                  |
-| Image & Text Co-Embeddings              | 3              | 1              | 2          | 0                  |
-| Cross-Modal Retrieval                   | 4              | 3              | 1          | 0                  |
+| Google Multimodal Embeddings            | 2              | 2              | 0          | 0                  |
+| Image & Text Co-Embeddings              | 3              | 3              | 0          | 0                  |
+| Cross-Modal Retrieval                   | 4              | 4              | 0          | 0                  |
 | Combining Text & Visual Context         | 3              | 3              | 0          | 0                  |
 | Indexing Images & Text Together         | 5              | 4              | 0          | 1                  |
 | Retrieval Strategies                    | 5              | 2              | 0          | 3                  |
@@ -169,7 +169,7 @@
 | Returning Mixed Content Responses       | 3              | 2              | 0          | 1                  |
 | Base64 Encoding for Images              | 3              | 3              | 0          | 0                  |
 | Streaming Multimodal Responses          | 3              | 0              | 0          | 3                  |
-| **Total**                               | **47**         | **29**         | **3**      | **15**             |
+| **Total**                               | **47**         | **33**         | **0**      | **14**             |
 
 ---
 
@@ -177,7 +177,7 @@
 
 The following are the key gaps to make this a complete multimodal RAG system:
 
-1. **Image captioning at ingestion** — Call Gemini Vision (`gemini-2.0-flash`) on each extracted image to generate a rich description. Embed that description instead of the bare caption string. (Issue 11 short-term fix)
+1. **Image captioning at ingestion** — Call Gemini Vision (`gemini-2.0-flash`) on each extracted image to generate a rich description. Embed that description as additional text alongside the visual embedding. (Issue 11 short-term, still useful for richer text fallback)
 
 2. **True multimodal embeddings** — Replace text-only embeddings for image chunks with `gemini-embedding-2-preview` which accepts image bytes directly. This enables visual similarity search. (Issue 11 long-term fix)
 

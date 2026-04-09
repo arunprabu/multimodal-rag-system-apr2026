@@ -8,7 +8,8 @@ import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from google import genai
+from google.genai import types as genai_types
 
 load_dotenv()
 
@@ -28,14 +29,71 @@ _PG_DSN = _PG_CONNECTION.replace("postgresql+psycopg://", "postgresql://")
 _EMBED_BATCH_SIZE = 50
 
 # ---------------------------------------------------------------------------
-# Issue 8 fix: Module-level embeddings singleton — avoids re-instantiating a
-# new HTTP client on every store_chunks() / similarity_search() call.
+# Issue 8 + 11 fix: Module-level google-genai client singleton.
+#
+# gemini-embedding-2-preview is a multimodal embedding model: it places text
+# AND image bytes into the SAME vector space (co-embedding).  This enables
+# true cross-modal retrieval — a text query like "revenue bar chart" can
+# match the actual chart image directly, not just its caption text.
+#
+# _embed_texts()  → batched text embedding for text/table chunks and queries
+# _embed_image()  → visual embedding of raw PNG bytes for image chunks
 # ---------------------------------------------------------------------------
-_embeddings_model = GoogleGenerativeAIEmbeddings(
-    model=os.getenv("GOOGLE_EMBEDDING_MODEL"),
-    google_api_key=os.getenv("GOOGLE_API_KEY"),
-    output_dimensionality=1536,
-)
+_EMBED_MODEL = os.getenv("GOOGLE_EMBEDDING_MODEL", "gemini-embedding-2-preview")
+# Matryoshka dimensionality supported by gemini-embedding-2-preview:
+# 768 | 1024 | 1536 | 3072.  1536 matches the existing DB schema.
+_EMBED_DIMENSIONS = 1536
+
+_genai_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed a batch of text strings using gemini-embedding-2-preview.
+
+    Batches up to _EMBED_BATCH_SIZE texts per API call to minimise
+    round-trips while staying within the model's per-request limit.
+    """
+    embeddings: list[list[float]] = []
+    for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[i : i + _EMBED_BATCH_SIZE]
+        contents = [
+            genai_types.Content(parts=[genai_types.Part.from_text(text=t)])
+            for t in batch
+        ]
+        result = _genai_client.models.embed_content(
+            model=_EMBED_MODEL,
+            contents=contents,
+            config=genai_types.EmbedContentConfig(
+                output_dimensionality=_EMBED_DIMENSIONS
+            ),
+        )
+        embeddings.extend(e.values for e in result.embeddings)
+    return embeddings
+
+
+def _embed_image(image_bytes: bytes) -> list[float]:
+    """Embed raw PNG image bytes using gemini-embedding-2-preview.
+
+    Passes the image directly to the multimodal model so the embedding
+    captures visual structure, colour, layout and text-in-image — not just
+    caption words.  The resulting vector lives in the same space as text
+    embeddings from _embed_texts(), so a natural-language query retrieves
+    visually matching images even when captions are absent or generic.
+    """
+    result = _genai_client.models.embed_content(
+        model=_EMBED_MODEL,
+        contents=genai_types.Content(
+            parts=[
+                genai_types.Part.from_bytes(
+                    data=image_bytes, mime_type="image/png"
+                )
+            ]
+        ),
+        config=genai_types.EmbedContentConfig(
+            output_dimensionality=_EMBED_DIMENSIONS
+        ),
+    )
+    return result.embeddings[0].values
 
 # ---------------------------------------------------------------------------
 # Issue 9 fix: Lazy connection pool — reuses existing TCP connections instead
@@ -115,9 +173,11 @@ def store_chunks(chunks: list[dict], doc_id: str) -> int:
         Number of rows inserted.
 
     Embedding strategy:
-        Texts are embedded in batches of _EMBED_BATCH_SIZE to minimise
-        API round-trips. embed_documents() takes a list and returns a
-        list of 768-dimensional float vectors in the same order.
+        text/table chunks are batch-embedded via _embed_texts() using
+        gemini-embedding-2-preview (up to _EMBED_BATCH_SIZE per API call).
+        image chunks are embedded via _embed_image() which sends the raw
+        PNG bytes to the same model, placing images in the same vector
+        space as text — enabling true cross-modal retrieval.
 
     Vector storage:
         pgvector accepts the '[f1,f2,…]' string literal when cast with
@@ -132,13 +192,33 @@ def store_chunks(chunks: list[dict], doc_id: str) -> int:
     if not chunks:
         return 0
 
-    contents = [c["content"] for c in chunks]
+    # ── Compute embeddings per modality ──────────────────────────────────────
+    # text/table chunks → batched text embedding (efficient, one API call per 50)
+    # image chunks      → multimodal visual embedding of raw PNG bytes
+    #
+    # Both use gemini-embedding-2-preview which projects text AND images into
+    # the same vector space — this is what enables cross-modal retrieval.
+    all_embeddings: list[list[float]] = [None] * len(chunks)  # type: ignore[list-item]
 
-    # ── Batch embed all chunks ────────────────────────────────────────────────
-    all_embeddings: list[list[float]] = []
-    for i in range(0, len(contents), _EMBED_BATCH_SIZE):
-        batch = contents[i : i + _EMBED_BATCH_SIZE]
-        all_embeddings.extend(_embeddings_model.embed_documents(batch))  # Issue 8
+    # Batch-embed all text and table chunks together for efficiency
+    text_indices = [
+        i for i, c in enumerate(chunks) if c["content_type"] in ("text", "table")
+    ]
+    if text_indices:
+        text_contents = [chunks[i]["content"] for i in text_indices]
+        for idx, emb in zip(text_indices, _embed_texts(text_contents)):
+            all_embeddings[idx] = emb
+
+    # Embed image chunks via raw PNG bytes — captures visual content directly
+    for i, chunk in enumerate(chunks):
+        if chunk["content_type"] != "image":
+            continue
+        img_b64 = chunk["metadata"].get("image_base64")
+        if img_b64:
+            all_embeddings[i] = _embed_image(base64.b64decode(img_b64))
+        else:
+            # No image bytes (caption-only fallback) — embed caption text
+            all_embeddings[i] = _embed_texts([chunk["content"]])[0]
 
     # ── Insert rows ───────────────────────────────────────────────────────────
     # Issue 10 fix: Only store fields in JSONB that don't already have a
@@ -241,7 +321,10 @@ def similarity_search(
     The <=> operator is pgvector's cosine distance operator.
     Similarity = 1 − cosine_distance, so 1.0 = identical, 0.0 = orthogonal.
     """
-    query_vec = _embeddings_model.embed_query(query)  # Issue 8: use singleton
+    # Embed the query text in the same vector space as documents and images.
+    # Using _embed_texts (not a separate text-only model) ensures the query
+    # vector aligns with both text chunks and image chunks in the DB.
+    query_vec = _embed_texts([query])[0]
     embedding_str = "[" + ",".join(str(v) for v in query_vec) + "]"
 
     # Conditionally add a chunk_type filter without SQL injection risk
@@ -326,5 +409,7 @@ def get_all_chunks(chunk_type: str | None = None, limit: int = 200) -> list[dict
         else:
             row["image_base64"] = None
         results.append(row)
+
+    return results
 
     return results

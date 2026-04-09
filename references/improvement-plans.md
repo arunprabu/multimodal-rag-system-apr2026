@@ -65,7 +65,7 @@ The company logo appears on every page as an embedded `picture` element. Docling
 ## Issue 3 — `iterate_items()` Tuple Unpacking is Reversed (Critical Bug)
 
 **Where:** `src/ingestion/docling_parser.py` (line ~68)  
-**Status:** ✅ Fixed — changed `node, _ = item` to `_, node = item` in `docling_parser.py`
+**Status:** ✅ Fixed — confirmed actual tuple order is `(node, level)` by runtime inspection; `node, _ = item` is the correct unpack for this Docling version
 
 **Problem:**  
 The comment says `iterate_items()` yields `(level, node)` tuples but the actual unpack is `node, _ = item`, which assigns `level` (an integer) to `node` and the real `DocItem` object to `_` (discarded). Every subsequent `getattr(node, "label", "")` call on an integer silently returns `""`, meaning almost no elements are ever processed — the parser produces empty or near-empty output.
@@ -119,7 +119,7 @@ Or add `ON DELETE CASCADE` on the `doc_id` foreign key and delete the document r
 
 **How to fix:**
 
-Add a `/api/v1/ingest` endpoint:
+Add a `/api/v1/ingest or /api/v1/admin/upload` endpoint:
 
 ```python
 # src/api/v1/routes/ingest.py
@@ -275,7 +275,7 @@ clean_meta = {k: v for k, v in meta.items() if k not in _DEDICATED_COLUMNS}
 ## Issue 11 — Images Embedded by Caption Text, Not Visual Content
 
 **Where:** `src/ingestion/docling_parser.py`, `src/core/db.py`  
-**Status:** ⚠️ Partially addressed — both fixes documented as code comments in `query_service.py`; neither is wired into production code yet. Short-term (Gemini Vision captioning at ingestion) and long-term (`gemini-embedding-2-preview` multimodal embeddings) approaches are described.
+**Status:** ✅ Fixed (long-term) — `db.py` now uses `gemini-embedding-2-preview` via google-genai SDK for all embeddings. Image chunks are embedded from raw PNG bytes via `_embed_image()`; text/table chunks use `_embed_texts()`. Both share the same vector space, enabling true cross-modal retrieval.
 
 **Problem:**  
 Image chunks use their caption text (or a placeholder like `"[Image on page 3]"`) as the `content` that gets embedded. The visual embedding is just a text embedding of the caption, not a multimodal embedding of the image pixels. A query like _"show me the revenue bar chart"_ only matches if those exact words appear in the caption — the image's visual content is never searched.
@@ -496,23 +496,23 @@ INSERT INTO multimodal_chunks (..., image_path, ...) VALUES (..., %s, ...)
 
 ## Summary Table
 
-| #   | Issue                                      | Severity     | Status     | File(s)                              |
-| --- | ------------------------------------------ | ------------ | ---------- | ------------------------------------ |
-| 1   | Header logo ingested 6×                    | High         | ❌ Open    | `docling_parser.py`                  |
-| 2   | Footer text not in DB                      | Medium       | ❌ Open    | `docling_parser.py`                  |
-| 3   | `iterate_items()` tuple unpacking reversed | **Critical** | ✅ Fixed   | `docling_parser.py`                  |
-| 4   | Re-ingestion duplicates all chunks         | High         | ✅ Fixed   | `ingestion.py`, `db.py`              |
-| 5   | No ingestion API endpoint                  | High         | ❌ Open    | `routes/`                            |
-| 6   | Debug `print` in production code           | Medium       | ❌ Open    | `query_service.py`                   |
-| 7   | System prompt sent as `HumanMessage`       | Medium       | ✅ Fixed   | `query_service.py`                   |
-| 8   | LLM/Embeddings re-instantiated per request | Medium       | ✅ Fixed   | `db.py`, `query_service.py`          |
-| 9   | No DB connection pooling                   | Medium       | ✅ Fixed   | `db.py`                              |
-| 10  | Redundant data in JSONB metadata column    | Low          | ✅ Fixed   | `db.py`                              |
-| 11  | Images embedded by caption text only       | High         | ⚠️ Partial | `docling_parser.py`, `db.py`         |
-| 12  | Hardcoded PDF path in ingestion script     | Medium       | ✅ Fixed   | `ingestion.py`                       |
-| 13  | No DB schema / migration file              | High         | ✅ Fixed   | `schema.sql`                         |
-| 14  | No error handling in API route             | Medium       | ❌ Open    | `routes/query.py`                    |
-| 15  | Wrong model name in `.env.example`         | Medium       | ⚠️ N/A     | `.env.example`                       |
-| 16  | `_test_docling.py` in project root         | Low          | ❌ Open    | `_test_docling.py`                   |
-| 17  | `chunk_type` filter not exposed in API     | Low          | ✅ Fixed   | `query_schema.py`, `routes/query.py` |
-| 18  | Large images in PostgreSQL BYTEA           | Medium       | ✅ Fixed   | `db.py`                              |
+| #   | Issue                                      | Severity     | Status   | File(s)                              |
+| --- | ------------------------------------------ | ------------ | -------- | ------------------------------------ |
+| 1   | Header logo ingested 6×                    | High         | ❌ Open  | `docling_parser.py`                  |
+| 2   | Footer text not in DB                      | Medium       | ❌ Open  | `docling_parser.py`                  |
+| 3   | `iterate_items()` tuple unpacking reversed | **Critical** | ✅ Fixed | `docling_parser.py`                  |
+| 4   | Re-ingestion duplicates all chunks         | High         | ✅ Fixed | `ingestion.py`, `db.py`              |
+| 5   | No ingestion API endpoint                  | High         | ❌ Open  | `routes/`                            |
+| 6   | Debug `print` in production code           | Medium       | ❌ Open  | `query_service.py`                   |
+| 7   | System prompt sent as `HumanMessage`       | Medium       | ✅ Fixed | `query_service.py`                   |
+| 8   | LLM/Embeddings re-instantiated per request | Medium       | ✅ Fixed | `db.py`, `query_service.py`          |
+| 9   | No DB connection pooling                   | Medium       | ✅ Fixed | `db.py`                              |
+| 10  | Redundant data in JSONB metadata column    | Low          | ✅ Fixed | `db.py`                              |
+| 11  | Images embedded by caption text only       | High         | ✅ Fixed | `db.py`                              |
+| 12  | Hardcoded PDF path in ingestion script     | Medium       | ✅ Fixed | `ingestion.py`                       |
+| 13  | No DB schema / migration file              | High         | ✅ Fixed | `schema.sql`                         |
+| 14  | No error handling in API route             | Medium       | ❌ Open  | `routes/query.py`                    |
+| 15  | Wrong model name in `.env.example`         | Medium       | ⚠️ N/A   | `.env.example`                       |
+| 16  | `_test_docling.py` in project root         | Low          | ❌ Open  | `_test_docling.py`                   |
+| 17  | `chunk_type` filter not exposed in API     | Low          | ✅ Fixed | `query_schema.py`, `routes/query.py` |
+| 18  | Large images in PostgreSQL BYTEA           | Medium       | ✅ Fixed | `db.py`                              |

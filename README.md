@@ -14,7 +14,9 @@ uv add python-multipart
 
 # To run ingestion
 
-uv run python -m src.ingestion.ingestion 2>&1
+```
+uv run python -m src.ingestion.ingestion
+```
 
 ====
 db query

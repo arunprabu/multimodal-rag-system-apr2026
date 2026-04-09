@@ -2,7 +2,56 @@ import base64
 import io
 import os
 
+from dotenv import load_dotenv
 from docling.datamodel.base_models import InputFormat
+from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+load_dotenv()
+
+def _describe_image_with_gemini(img_b64: str) -> str:
+    """Call Gemini Vision to generate a rich, searchable description of an image.
+
+    Used at ingestion time so image chunks carry meaningful text content that
+    can be found by natural-language queries — not just sparse caption words.
+
+    Returns an empty string on any error so the caller can fall back to the
+    Docling-extracted caption or a placeholder.
+    """
+   
+
+    vision_model = os.getenv("GOOGLE_VISION_MODEL", "gemini-2.0-flash")
+    vision_llm = ChatGoogleGenerativeAI(
+        model=vision_model,
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+    )
+    msg = HumanMessage(
+        content=[
+            {
+                "type": "text",
+                "text": (
+                    "Describe this image in detail for document search indexing. "
+                    "Include chart titles, axis labels, legend entries, key data "
+                    "points, trends, numbers, and any visible text. Be specific."
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+            },
+        ]
+    )
+    try:
+        response = vision_llm.invoke([msg])
+        content = response.content
+        if isinstance(content, list):
+            return " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ).strip()
+        return str(content).strip()
+    except Exception:
+        return ""
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
@@ -74,7 +123,7 @@ def parse_document(file_path: str) -> list[dict]:
     # level is the heading depth (1 = top-level); node is the DocItem.
     for item in doc.iterate_items():
         if isinstance(item, tuple):
-            _, node = item  # unpack yields (level, node); discard level
+            node, _ = item  # iterate_items() yields (node, level); discard level
         else:
             node = item     # older Docling versions yield bare nodes
 
@@ -220,10 +269,15 @@ def parse_document(file_path: str) -> list[dict]:
                 # fatal — the caption / placeholder text is still indexed.
                 pass
 
-            # Use the caption as the searchable text for this image chunk.
-            # If no caption exists, store a location placeholder so the chunk
-            # is not completely empty (PGVector requires non-empty content).
-            content = caption.strip() or f"[Image on page {page_no}]"
+            # Use Gemini Vision to generate a rich description for this image.
+            # This becomes the chunk's searchable text content — far more useful
+            # than a sparse caption like "Figure 3" for embedding and retrieval.
+            # Falls back to Docling caption → placeholder if Vision call fails.
+            if img_b64:
+                description = _describe_image_with_gemini(img_b64)
+                content = description or caption.strip() or f"[Image on page {page_no}]"
+            else:
+                content = caption.strip() or f"[Image on page {page_no}]"
             parsed_chunks.append(
                 {
                     "content": content,
