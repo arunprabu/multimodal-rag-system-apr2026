@@ -5,16 +5,54 @@ Google Embedding Models
 
 # What should we do when docling finds different content types of PDF ?
 
-1.  text
-    extract the text and make it chunks in ingestion layer
-2.  table
-    extract the table -> convert to data frame -> make it chunks in ingestion layer
-3.  image
-    extract the image -> (1. convert the image to base64 img ) -> pass it to get saved in vector db
-    [or]
-    -> (2. save that image into s3 kind of cloud storage) -> save the url in vector db.
-    ----
+```
+PDF File
+   │
+   ▼
+┌─────────────────────────────┐
+│  Docling Parser             │  → Extracts text, tables, images
+│  (docling_parser.py)        │
+└──────────────┬──────────────┘
+               │
+               ▼ detects content type
+       ┌───────┴────────────────┐
+       │                        │                        │
+       ▼                        ▼                        ▼
+  ┌─────────┐             ┌──────────┐             ┌──────────┐
+  │  Text   │             │  Table   │             │  Image   │
+  └────┬────┘             └────┬─────┘             └────┬─────┘
+       │                       │                        │
+       ▼                       ▼               ┌────────┴────────┐
+  Extract Text            Extract Table        │                 │
+       │                       │           Option A          Option B
+       ▼                       ▼               │                 │
+   Chunk Text             Convert to        Convert to       Upload to
+                          DataFrame         Base64 img       S3 / Cloud
+                              │                  │                 │
+                              ▼                  └────────┬────────┘
+                          Chunk Table                     ▼
+                                            Vision-capable LLM
+                                            (e.g. Gemini Pro Vision)
+                                            → Generate image description
+       │                       │                         │
+       ▼                       ▼                         ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    Generate Embeddings                       │
+│                                                              │
+│   Text / Table / Image desc →  gemini-embedding-2-preview    │
+└───────────────────────────────┬──────────────────────────────┘
+                                │
+                                ▼
+                    ┌───────────────────────┐
+                    │   Vector Database     │
+                    │      (PgVector)       │
+                    └───────────────────────┘
+```
 
-                      -> to further understand either the base64 image or s3 url -we need LLM (vision capable modal)  and ask it to give description of that image and then save the description in vector db
+**Key decisions:**
 
+- **Text** → chunk → embed with `gemini-embedding-001`
+- **Table** → DataFrame → chunk → embed with `gemini-embedding-001`
+- **Image** → store as Base64 or S3 URL → Vision LLM generates a description → embed with `gemini-embedding-2-preview`
 
+> Images are never stored raw in the vector DB. Their LLM-generated descriptions are, enabling semantic search over visual content.
